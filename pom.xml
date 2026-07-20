@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>com.yuancode</groupId>
     <artifactId>yuancode</artifactId>
-    <version>0.4.0</version>
+    <version>0.4.2</version>
     <name>YuanCode</name>
 
     <properties>
@@ -41,7 +41,7 @@
     </dependencies>
 
     <build>
-        <finalName>yuancode-v0.4.0</finalName>
+        <finalName>yuancode-v0.4.2</finalName>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

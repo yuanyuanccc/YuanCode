@@ -7,7 +7,7 @@ YuanCode 是一个 Java 21 终端 AI 助手，支持 Claude Code 风格的内联
 ```bash
 ./mvnw test
 ./mvnw package
-java -jar target/yuancode-v0.4.0.jar
+java -jar target/yuancode-v0.4.2.jar
 ```
 
 Windows PowerShell 使用 `.\\mvnw.cmd test` 和 `.\\mvnw.cmd package`。构建前请确保 `JAVA_HOME` 指向 Java 21。

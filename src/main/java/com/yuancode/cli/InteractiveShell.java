@@ -21,7 +21,7 @@ import java.util.function.Function;
 
 public final class InteractiveShell {
     private static final Duration STREAM_IDLE_TIMEOUT = Duration.ofSeconds(90);
-    private static final String VERSION = "0.4.0";
+    private static final String VERSION = "0.4.2";
     private final BufferedReader plainInput;
     private final InteractiveInput interactiveInput;
     private final PrintWriter output;

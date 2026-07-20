@@ -31,6 +31,10 @@ public final class PromptRenderer {
         return border('╰', '╯', width);
     }
 
+    public String emptyRow(int width) {
+        return theme.accent("│") + " ".repeat(Math.max(1, width - 2)) + theme.accent("│");
+    }
+
     private String border(char left, char right, int width) {
         return theme.accent(left + "─".repeat(Math.max(1, width - 2)) + right);
     }

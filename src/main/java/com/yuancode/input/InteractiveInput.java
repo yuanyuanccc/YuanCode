@@ -6,6 +6,7 @@ import org.jline.keymap.KeyMap;
 import org.jline.reader.*;
 import org.jline.reader.impl.DefaultParser;
 import org.jline.terminal.Terminal;
+import org.jline.utils.InfoCmp;
 
 public final class InteractiveInput {
     private final LineReader reader;
@@ -40,8 +41,10 @@ public final class InteractiveInput {
     public ReadResult read() {
         int width = Math.max(20, terminal.getWidth());
         terminal.writer().println(prompt.identity(System.getProperty("user.name", "user")));
-        terminal.writer().println(prompt.topBorder(width));
-        terminal.writer().flush();
+        boolean dynamicFrame = terminal.getStringCapability(InfoCmp.Capability.cursor_up) != null
+                && terminal.getStringCapability(InfoCmp.Capability.cursor_down) != null;
+        InputFrame frame = new InputFrame(terminal.writer(), prompt, width, dynamicFrame);
+        frame.open();
         try {
             return new ReadResult.Message(reader.readLine(
                     prompt.primary(), prompt.rightHint(), (MaskingCallback) null, null));
@@ -50,9 +53,7 @@ public final class InteractiveInput {
         } catch (EndOfFileException eof) {
             return new ReadResult.EndOfFile();
         } finally {
-            terminal.writer().println();
-            terminal.writer().println(prompt.bottomBorder(width));
-            terminal.writer().flush();
+            frame.close();
         }
     }
 
