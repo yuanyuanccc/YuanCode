@@ -1,0 +1,33 @@
+package com.yuancode.cli;
+
+public final class CommandParser {
+    public Command parse(String input) {
+        String value = input == null ? "" : input.trim();
+        if (!value.startsWith("/")) return new Command.Message(input == null ? "" : input);
+        String[] parts = value.split("\\s+", 2);
+        return switch (parts[0]) {
+            case "/help" -> new Command.Help();
+            case "/clear" -> new Command.Clear();
+            case "/exit", "/quit" -> new Command.Exit();
+            case "/model" -> new Command.Model();
+            case "/status" -> new Command.Status();
+            case "/config" -> new Command.Config();
+            case "/provider" -> parts.length == 2 && !parts[1].isBlank()
+                    ? new Command.SwitchProvider(parts[1].trim()) : new Command.Invalid("用法: /provider <name>");
+            default -> new Command.Invalid("未知命令: " + parts[0]);
+        };
+    }
+
+    public sealed interface Command permits Command.Message, Command.Help, Command.Clear,
+            Command.Exit, Command.SwitchProvider, Command.Model, Command.Status, Command.Config, Command.Invalid {
+        record Message(String text) implements Command {}
+        record Help() implements Command {}
+        record Clear() implements Command {}
+        record Exit() implements Command {}
+        record SwitchProvider(String name) implements Command {}
+        record Model() implements Command {}
+        record Status() implements Command {}
+        record Config() implements Command {}
+        record Invalid(String message) implements Command {}
+    }
+}

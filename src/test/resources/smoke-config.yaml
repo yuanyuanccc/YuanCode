@@ -1,0 +1,8 @@
+active_provider: local
+providers:
+  local:
+    protocol: anthropic
+    model: test-model
+    base_url: http://127.0.0.1:1
+    api_key: test-only-key
+    max_tokens: 4096
