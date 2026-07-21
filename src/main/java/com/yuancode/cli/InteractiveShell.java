@@ -3,12 +3,16 @@ package com.yuancode.cli;
 import com.yuancode.config.AppConfig;
 import com.yuancode.config.ConfigException;
 import com.yuancode.config.ProviderConfig;
+import com.yuancode.agent.AgentLoop;
 import com.yuancode.conversation.Conversation;
-import com.yuancode.conversation.ThinkingBlock;
+import com.yuancode.conversation.ToolResultBlock;
 import com.yuancode.input.InteractiveInput;
 import com.yuancode.llm.*;
 import com.yuancode.ui.*;
 import com.yuancode.ui.markdown.MarkdownStreamRenderer;
+import com.yuancode.tool.ToolRegistry;
+import com.yuancode.tool.impl.AskUserTool;
+import com.yuancode.tool.impl.ToolSearchTool;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -16,12 +20,14 @@ import java.io.PrintWriter;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 public final class InteractiveShell {
     private static final Duration STREAM_IDLE_TIMEOUT = Duration.ofSeconds(90);
-    private static final String VERSION = "0.4.2";
+    private static final String VERSION = "0.5.0";
     private final BufferedReader plainInput;
     private final InteractiveInput interactiveInput;
     private final PrintWriter output;
@@ -39,6 +45,7 @@ public final class InteractiveShell {
     private volatile Thread runThread;
     private String providerName;
     private LlmClient client;
+    private ToolRegistry registry;
 
     public InteractiveShell(BufferedReader input, PrintWriter output, AppConfig config,
                             Function<ProviderConfig, LlmClient> clientFactory) {
@@ -148,6 +155,9 @@ public final class InteractiveShell {
             LlmClient replacement = clientFactory.apply(selected);
             providerName = name;
             client = replacement;
+            registry = ToolRegistry.createDefault(workingDirectory);
+            registry.register(new ToolSearchTool(registry, selected.protocol()));
+            registry.register(new AskUserTool(this::askQuestions));
             if (announce) output.println(theme.muted("已切换 Provider: " + providerName));
         } catch (ConfigException error) {
             output.println(theme.error(error.getMessage()));
@@ -156,60 +166,55 @@ public final class InteractiveShell {
 
     private void chat(String prompt) {
         if (interactiveInput == null) output.println(theme.user("> " + prompt));
-        conversation.addUser(prompt);
-        StringBuilder text = new StringBuilder();
-        StringBuilder thinking = new StringBuilder();
-        StringBuilder signature = new StringBuilder();
         boolean[] thinkingStarted = {false};
         boolean[] textStarted = {false};
         LiveStatus status = new LiveStatus(output, theme, dynamic);
         MarkdownStreamRenderer markdown = new MarkdownStreamRenderer(output, theme);
         MessageChrome chrome = new MessageChrome(theme);
         status.start();
-        try (StreamHandle stream = client.stream(new LlmRequest(conversation.messages(),
-                "You are YuanCode, a helpful terminal AI coding assistant."))) {
-            activeStream.set(stream);
-            while (true) {
-                StreamEvent event = stream.next(STREAM_IDLE_TIMEOUT);
-                switch (event) {
-                    case StreamEvent.TextDelta delta -> {
+        try {
+            ProviderConfig provider = config.provider(providerName);
+            AgentLoop loop = new AgentLoop(client, conversation, registry, provider.protocol(),
+                    "You are YuanCode, a helpful terminal AI coding assistant. Use tools when needed.",
+                    STREAM_IDLE_TIMEOUT);
+            loop.run(prompt, new AgentLoop.Listener() {
+                    @Override public void streamOpened(StreamHandle stream) { activeStream.set(stream); }
+                    @Override public void streamClosed() { activeStream.set(null); }
+                    @Override public void text(String delta) {
                         if (!textStarted[0]) {
                             status.firstToken();
                             if (thinkingStarted[0]) output.println(theme.muted("Thinking complete"));
                             output.print(chrome.answerPrefix());
                             textStarted[0] = true;
                         }
-                        markdown.accept(delta.text());
-                        text.append(delta.text());
+                        markdown.accept(delta);
                     }
-                    case StreamEvent.ThinkingDelta delta -> {
+                    @Override public void thinking(String delta) {
                         if (!thinkingStarted[0]) {
                             status.firstToken();
                             output.print(chrome.thinkingPrefix() + theme.muted("Thinking… "));
                             thinkingStarted[0] = true;
                         }
-                        output.print(theme.muted(delta.text()));
+                        output.print(theme.muted(delta));
                         output.flush();
-                        thinking.append(delta.text());
                     }
-                    case StreamEvent.ThinkingSignature delta -> signature.append(delta.signature());
-                    case StreamEvent.Completed completed -> {
+                    @Override public void toolCall(String name) {
+                        status.firstToken();
+                        if (thinkingStarted[0] && !textStarted[0]) output.println();
+                        output.println(theme.muted("◆ Running " + name + "…"));
+                    }
+                    @Override public void toolResult(String name, ToolResultBlock result) {
+                        String marker = result.isError() ? "✗" : "✓";
+                        output.println(theme.muted(marker + " " + name));
+                        if (!result.output().isBlank()) output.println(theme.muted(result.output()));
+                    }
+                    @Override public void completed(TokenUsage usage) {
                         status.firstToken();
                         markdown.finish();
                         output.println();
-                        output.println(new ResponseSummaryRenderer(theme).render(status.elapsed(), completed.usage()));
-                        List<ThinkingBlock> blocks = signature.isEmpty() && thinking.isEmpty() ? List.of()
-                                : List.of(new ThinkingBlock(thinking.toString(), signature.toString()));
-                        conversation.addAssistant(text.toString(), blocks);
-                        return;
+                        output.println(new ResponseSummaryRenderer(theme).render(status.elapsed(), usage));
                     }
-                    case StreamEvent.Failed failed -> {
-                        status.firstToken();
-                        output.println(theme.error("错误: " + failed.error().getMessage()));
-                        return;
-                    }
-                }
-            }
+                });
         } catch (InterruptedException cancelled) {
             Thread.interrupted();
             status.firstToken();
@@ -222,6 +227,29 @@ public final class InteractiveShell {
             status.close();
             output.flush();
         }
+    }
+
+    private Map<String, String> askQuestions(List<Map<String, Object>> questions) throws IOException {
+        Map<String, String> answers = new LinkedHashMap<>();
+        for (Map<String, Object> question : questions) {
+            String header = String.valueOf(question.getOrDefault("header", "Question"));
+            output.println(theme.user("? " + question.getOrDefault("question", header)));
+            Object rawOptions = question.get("options");
+            if (rawOptions instanceof List<?> options) {
+                for (int index = 0; index < options.size(); index++) {
+                    Object option = options.get(index);
+                    Object label = option instanceof Map<?, ?> map ? map.get("label") : option;
+                    output.println(theme.muted("  " + (index + 1) + ". " + label));
+                }
+            }
+            output.flush();
+            InputResult input = readInput();
+            if (!(input instanceof InputResult.Message message) || message.text().isBlank()) {
+                return Map.of("_declined", "true");
+            }
+            answers.put(header, message.text());
+        }
+        return answers;
     }
 
     private static String safeMessage(RuntimeException error) {

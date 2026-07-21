@@ -12,6 +12,8 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -19,6 +21,67 @@ class ProviderStreamingTest {
     private HttpServer server;
 
     @AfterEach void stop() { if (server != null) server.stop(0); }
+
+    @Test
+    void anthropicRoundTripsStreamingToolCalls() throws Exception {
+        AtomicReference<String> body = new AtomicReference<>();
+        start("/v1/messages", body, """
+                data: {"type":"message_start","message":{"usage":{"input_tokens":5}}}
+
+                data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-1","name":"ReadFile","input":{}}}
+
+                data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"file_path\\":\\"a.txt\\"}"}}
+
+                data: {"type":"content_block_stop","index":0}
+
+                data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":3}}
+
+                """);
+        ProviderConfig cfg = config("anthropic", "claude-sonnet-4-6", false, false);
+        Conversation conversation = new Conversation();
+        conversation.addUser("read");
+        LlmRequest request = new LlmRequest(conversation.messages(), "", List.of(Map.of(
+                "name", "ReadFile", "description", "read", "input_schema", Map.of("type", "object"))));
+
+        try (StreamHandle stream = LlmClientFactory.create(cfg).stream(request)) {
+            assertInstanceOf(StreamEvent.ToolCallStart.class, stream.next(Duration.ofSeconds(2)));
+            assertInstanceOf(StreamEvent.ToolCallDelta.class, stream.next(Duration.ofSeconds(2)));
+            StreamEvent.ToolCallComplete complete = (StreamEvent.ToolCallComplete) stream.next(Duration.ofSeconds(2));
+            assertEquals("a.txt", complete.arguments().get("file_path"));
+            assertEquals("tool_use", ((StreamEvent.Completed) stream.next(Duration.ofSeconds(2))).stopReason());
+        }
+        assertTrue(body.get().contains("\"tools\""));
+        assertTrue(body.get().contains("\"ReadFile\""));
+    }
+
+    @Test
+    void openAiMapsStreamingFunctionCalls() throws Exception {
+        AtomicReference<String> body = new AtomicReference<>();
+        start("/v1/responses", body, """
+                data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call-2","name":"Bash"}}
+
+                data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"command\\":\\"pwd\\"}"}
+
+                data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"command\\":\\"pwd\\"}"}
+
+                data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":2,"output_tokens":2}}}
+
+                """);
+        ProviderConfig cfg = config("openai", "gpt-5-mini", false, false);
+        Conversation conversation = new Conversation();
+        conversation.addUser("pwd");
+
+        try (StreamHandle stream = LlmClientFactory.create(cfg).stream(new LlmRequest(
+                conversation.messages(), "", List.of(Map.of("type", "function", "name", "Bash",
+                "description", "run", "parameters", Map.of("type", "object")))))) {
+            assertInstanceOf(StreamEvent.ToolCallStart.class, stream.next(Duration.ofSeconds(2)));
+            assertInstanceOf(StreamEvent.ToolCallDelta.class, stream.next(Duration.ofSeconds(2)));
+            StreamEvent.ToolCallComplete complete = (StreamEvent.ToolCallComplete) stream.next(Duration.ofSeconds(2));
+            assertEquals("pwd", complete.arguments().get("command"));
+            assertInstanceOf(StreamEvent.Completed.class, stream.next(Duration.ofSeconds(2)));
+        }
+        assertTrue(body.get().contains("\"tools\""));
+    }
 
     @Test
     void anthropicStreamsTextAndUsesAdaptiveThinking() throws Exception {
