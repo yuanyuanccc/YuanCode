@@ -11,16 +11,18 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class ToolExtensionsTest {
     @Test
-    void searchDiscoversSelectedDeferredTool() {
+    void askUserQuestionIsAlwaysAvailableWithoutToolSearch() {
         ToolRegistry registry = new ToolRegistry();
         registry.register(new AskUserTool(questions -> Map.of("choice", "yes")));
         ToolSearchTool search = new ToolSearchTool(registry, "anthropic");
 
-        ToolResult result = search.execute(Map.of("query", "select:AskUser"));
+        ToolResult result = search.execute(Map.of("query", "select:AskUserQuestion"));
 
         assertFalse(result.isError());
-        assertTrue(result.output().contains("AskUser"));
-        assertTrue(registry.isDiscovered("AskUser"));
+        assertEquals("[]", result.output());
+        assertFalse(registry.isDiscovered("AskUserQuestion"));
+        assertTrue(registry.getAllSchemas("anthropic").stream()
+                .anyMatch(schema -> "AskUserQuestion".equals(schema.get("name"))));
     }
 
     @Test

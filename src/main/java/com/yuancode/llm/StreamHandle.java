@@ -3,10 +3,12 @@ package com.yuancode.llm;
 import java.time.Duration;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class StreamHandle implements AutoCloseable {
     private final BlockingQueue<StreamEvent> events;
     private final Runnable cancel;
+    private final AtomicBoolean closed = new AtomicBoolean();
 
     public StreamHandle(BlockingQueue<StreamEvent> events, Runnable cancel) {
         this.events = events;
@@ -18,6 +20,8 @@ public final class StreamHandle implements AutoCloseable {
         return event == null ? new StreamEvent.Failed(new LlmException.StreamTimeout()) : event;
     }
 
-    public void cancel() { cancel.run(); }
+    public void cancel() {
+        if (closed.compareAndSet(false, true)) cancel.run();
+    }
     @Override public void close() { cancel(); }
 }

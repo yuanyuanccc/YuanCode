@@ -10,10 +10,12 @@ public final class AskUserTool implements Tool {
     private final UserQuestionHandler handler;
 
     public AskUserTool(UserQuestionHandler handler) { this.handler = Objects.requireNonNull(handler); }
-    public String name() { return "AskUser"; }
-    public String description() { return "Ask the user one to four structured questions."; }
+    public String name() { return "AskUserQuestion"; }
+    public String description() {
+        return "Ask the user one to four structured clarification questions before making assumptions.";
+    }
     public ToolCategory category() { return ToolCategory.READ; }
-    public boolean shouldDefer() { return true; }
+    public boolean shouldDefer() { return false; }
     public Map<String, Object> schema() {
         Map<String, Object> option = ToolSchemas.object(Map.of(
                 "label", ToolSchemas.string("Choice label"),

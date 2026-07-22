@@ -59,6 +59,54 @@ class InteractiveShellTest {
         assertEquals(0, calls[0]);
     }
 
+    @Test
+    void planCommandsAreVisibleInStatusAndSystemPrompt() throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        AtomicReference<LlmRequest> captured = new AtomicReference<>();
+        LlmClient fake = request -> {
+            captured.set(request);
+            var queue = new LinkedBlockingQueue<StreamEvent>();
+            queue.add(new StreamEvent.TextDelta("plan"));
+            queue.add(new StreamEvent.Completed("done", TokenUsage.EMPTY));
+            return new StreamHandle(queue, () -> {});
+        };
+        ProviderConfig provider = provider("claude", "anthropic");
+        AppConfig config = new AppConfig("claude", Map.of("claude", provider));
+        var shell = new InteractiveShell(new BufferedReader(new StringReader(
+                "/plan on\n/status\ninspect\n/plan off\n/status\n/exit\n")),
+                new PrintWriter(bytes, true, StandardCharsets.UTF_8), config, ignored -> fake);
+
+        shell.run();
+
+        String output = bytes.toString(StandardCharsets.UTF_8);
+        assertTrue(output.contains("模式: PLAN_ONLY"));
+        assertTrue(output.contains("模式: NORMAL"));
+        assertTrue(captured.get().systemPrompt().contains("只使用读取工具"));
+    }
+
+    @Test
+    void broadBuildRequestsReceiveAnAlwaysAvailableClarificationToolAndPolicy() throws Exception {
+        AtomicReference<LlmRequest> captured = new AtomicReference<>();
+        LlmClient fake = request -> {
+            captured.set(request);
+            var queue = new LinkedBlockingQueue<StreamEvent>();
+            queue.add(new StreamEvent.TextDelta("ok"));
+            queue.add(new StreamEvent.Completed("done", TokenUsage.EMPTY));
+            return new StreamHandle(queue, () -> {});
+        };
+        ProviderConfig provider = provider("deepseek", "anthropic");
+        AppConfig config = new AppConfig("deepseek", Map.of("deepseek", provider));
+        var shell = new InteractiveShell(new BufferedReader(new StringReader("我要一个电商系统\n/exit\n")),
+                new PrintWriter(new StringWriter()), config, ignored -> fake);
+
+        shell.run();
+
+        assertTrue(captured.get().tools().stream()
+                .anyMatch(schema -> "AskUserQuestion".equals(schema.get("name"))));
+        assertTrue(captured.get().systemPrompt().contains("必须先使用 AskUserQuestion"));
+        assertTrue(captured.get().systemPrompt().contains("大型、宽泛"));
+    }
+
     private static ProviderConfig provider(String name, String protocol) {
         return new ProviderConfig(name, protocol, "model", "http://localhost:1", "secret", 4096, false, false);
     }

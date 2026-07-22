@@ -17,6 +17,13 @@ public final class Conversation {
         history.add(ConversationMessage.toolResults(results));
     }
     public List<ConversationMessage> messages() { return List.copyOf(history); }
+    public int checkpoint() { return history.size(); }
+    public void rollbackTo(int checkpoint) {
+        if (checkpoint < 0 || checkpoint > history.size()) {
+            throw new IllegalArgumentException("Invalid conversation checkpoint: " + checkpoint);
+        }
+        history.subList(checkpoint, history.size()).clear();
+    }
     public long completedTurns() {
         return history.stream().filter(message -> message.role() == ConversationMessage.Role.ASSISTANT).count();
     }

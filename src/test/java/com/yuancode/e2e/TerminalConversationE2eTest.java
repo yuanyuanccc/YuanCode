@@ -52,7 +52,7 @@ class TerminalConversationE2eTest {
         assertNotNull(captured.get());
         assertEquals("first line\nsecond line", captured.get().messages().getFirst().text());
         String rendered = output.toString(StandardCharsets.UTF_8);
-        assertTrue(rendered.contains("YuanCode v0.5.0"));
+        assertTrue(rendered.contains("YuanCode v0.6.1"));
         assertTrue(rendered.contains("int value = 1;"));
         assertFalse(rendered.contains("assistant>"));
     }

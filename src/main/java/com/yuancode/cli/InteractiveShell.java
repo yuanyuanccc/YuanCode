@@ -3,7 +3,7 @@ package com.yuancode.cli;
 import com.yuancode.config.AppConfig;
 import com.yuancode.config.ConfigException;
 import com.yuancode.config.ProviderConfig;
-import com.yuancode.agent.AgentLoop;
+import com.yuancode.agent.*;
 import com.yuancode.conversation.Conversation;
 import com.yuancode.conversation.ToolResultBlock;
 import com.yuancode.input.InteractiveInput;
@@ -26,8 +26,19 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 public final class InteractiveShell {
-    private static final Duration STREAM_IDLE_TIMEOUT = Duration.ofSeconds(90);
-    private static final String VERSION = "0.5.0";
+    private static final Duration STREAM_IDLE_TIMEOUT = Duration.ofSeconds(30);
+    private static final String VERSION = "0.6.1";
+    private static final String SYSTEM_PROMPT = """
+            You are YuanCode, a terminal AI coding assistant. Use tools when needed.
+
+            Clarification policy:
+            - When a request is large, broad, or underspecified and multiple materially different implementations are possible, you must first use AskUserQuestion before planning or changing files.
+            - Examples include building an e-commerce system, a management platform, or an entire application without requirements.
+            - Ask only the highest-impact questions, provide 2-4 concrete options, put the recommended option first, and do not ask for details that can be safely discovered from the workspace.
+            - Do not use AskUserQuestion for a narrow, unambiguous task.
+
+            中文规则：遇到“大型、宽泛、关键约束缺失且存在多种实现方向”的开发需求，必须先使用 AskUserQuestion 澄清，再制定计划或修改文件。
+            """;
     private final BufferedReader plainInput;
     private final InteractiveInput interactiveInput;
     private final PrintWriter output;
@@ -35,7 +46,7 @@ public final class InteractiveShell {
     private final Function<ProviderConfig, LlmClient> clientFactory;
     private final Conversation conversation = new Conversation();
     private final CommandParser parser = new CommandParser();
-    private final AtomicReference<StreamHandle> activeStream = new AtomicReference<>();
+    private final AtomicReference<AgentRun> activeRun = new AtomicReference<>();
     private final Theme theme;
     private final boolean dynamic;
     private final int width;
@@ -46,6 +57,7 @@ public final class InteractiveShell {
     private String providerName;
     private LlmClient client;
     private ToolRegistry registry;
+    private AgentMode agentMode = AgentMode.NORMAL;
 
     public InteractiveShell(BufferedReader input, PrintWriter output, AppConfig config,
                             Function<ProviderConfig, LlmClient> clientFactory) {
@@ -89,12 +101,12 @@ public final class InteractiveShell {
     }
 
     public boolean handleInterrupt() {
-        StreamHandle stream = activeStream.get();
-        if (stream == null) {
+        AgentRun run = activeRun.get();
+        if (run == null) {
             exitRequested = true;
             return true;
         }
-        stream.cancel();
+        run.cancel();
         Thread thread = runThread;
         if (thread != null) thread.interrupt();
         return false;
@@ -127,7 +139,7 @@ public final class InteractiveShell {
                 if (!message.text().isBlank()) chat(message.text());
             }
             case CommandParser.Command.Help ignored -> output.println(
-                    "/help  /clear  /provider <name>  /model  /status  /config  /exit  /quit");
+                    "/help  /clear  /provider <name>  /model  /plan [on|off]  /status  /config  /exit  /quit");
             case CommandParser.Command.Clear ignored -> {
                 conversation.clear();
                 output.println(theme.muted("对话已清空"));
@@ -136,11 +148,20 @@ public final class InteractiveShell {
             case CommandParser.Command.SwitchProvider change -> switchProvider(change.name(), true);
             case CommandParser.Command.Model ignored -> showModel();
             case CommandParser.Command.Status ignored -> output.println(theme.muted(
-                    "工作目录: " + workingDirectory + " · 会话轮数: " + conversation.completedTurns()));
+                    "工作目录: " + workingDirectory + " · 会话轮数: " + conversation.completedTurns()
+                            + " · 模式: " + agentMode));
             case CommandParser.Command.Config ignored -> output.println(theme.muted("配置文件: " + configPath));
+            case CommandParser.Command.Plan plan -> setPlanMode(plan.enabled());
             case CommandParser.Command.Invalid invalid -> output.println(theme.error(invalid.message()));
         }
         output.flush();
+    }
+
+    private void setPlanMode(Boolean enabled) {
+        agentMode = enabled == null
+                ? (agentMode == AgentMode.NORMAL ? AgentMode.PLAN_ONLY : AgentMode.NORMAL)
+                : (enabled ? AgentMode.PLAN_ONLY : AgentMode.NORMAL);
+        output.println(theme.muted("模式: " + agentMode));
     }
 
     private void showModel() {
@@ -175,46 +196,60 @@ public final class InteractiveShell {
         try {
             ProviderConfig provider = config.provider(providerName);
             AgentLoop loop = new AgentLoop(client, conversation, registry, provider.protocol(),
-                    "You are YuanCode, a helpful terminal AI coding assistant. Use tools when needed.",
+                    SYSTEM_PROMPT,
                     STREAM_IDLE_TIMEOUT);
-            loop.run(prompt, new AgentLoop.Listener() {
-                    @Override public void streamOpened(StreamHandle stream) { activeStream.set(stream); }
-                    @Override public void streamClosed() { activeStream.set(null); }
-                    @Override public void text(String delta) {
+            loop.setMode(agentMode);
+            AgentRun run = loop.start(prompt);
+            activeRun.set(run);
+            boolean finished = false;
+            while (!finished) {
+                AgentEvent event = run.next(STREAM_IDLE_TIMEOUT.plusSeconds(1));
+                if (event == null) throw new LlmException.StreamTimeout();
+                switch (event) {
+                    case AgentEvent.TextDelta delta -> {
                         if (!textStarted[0]) {
                             status.firstToken();
                             if (thinkingStarted[0]) output.println(theme.muted("Thinking complete"));
                             output.print(chrome.answerPrefix());
                             textStarted[0] = true;
                         }
-                        markdown.accept(delta);
+                        markdown.accept(delta.text());
                     }
-                    @Override public void thinking(String delta) {
+                    case AgentEvent.ThinkingDelta delta -> {
                         if (!thinkingStarted[0]) {
                             status.firstToken();
                             output.print(chrome.thinkingPrefix() + theme.muted("Thinking… "));
                             thinkingStarted[0] = true;
                         }
-                        output.print(theme.muted(delta));
+                        output.print(theme.muted(delta.text()));
                         output.flush();
                     }
-                    @Override public void toolCall(String name) {
+                    case AgentEvent.ToolCallStarted started -> {
                         status.firstToken();
                         if (thinkingStarted[0] && !textStarted[0]) output.println();
-                        output.println(theme.muted("◆ Running " + name + "…"));
+                        output.println(theme.muted("◆ Running " + started.toolName() + "…"));
                     }
-                    @Override public void toolResult(String name, ToolResultBlock result) {
+                    case AgentEvent.ToolResultCompleted result -> {
                         String marker = result.isError() ? "✗" : "✓";
-                        output.println(theme.muted(marker + " " + name));
+                        output.println(theme.muted(marker + " " + result.toolName()));
                         if (!result.output().isBlank()) output.println(theme.muted(result.output()));
                     }
-                    @Override public void completed(TokenUsage usage) {
+                    case AgentEvent.FinalReply reply -> {
                         status.firstToken();
                         markdown.finish();
                         output.println();
-                        output.println(new ResponseSummaryRenderer(theme).render(status.elapsed(), usage));
+                        output.println(new ResponseSummaryRenderer(theme).render(status.elapsed(), reply.usage()));
                     }
-                });
+                    case AgentEvent.Error error -> output.println(theme.error("错误: " + error.message()));
+                    case AgentEvent.LoopCompleted completed -> {
+                        if (completed.reason() == AgentTermination.CANCELLED) output.println(theme.muted("已取消"));
+                        else if (completed.reason() == AgentTermination.MAX_ITERATIONS)
+                            output.println(theme.error("错误: 已达到最大模型迭代次数"));
+                        finished = true;
+                    }
+                    default -> { }
+                }
+            }
         } catch (InterruptedException cancelled) {
             Thread.interrupted();
             status.firstToken();
@@ -223,7 +258,7 @@ public final class InteractiveShell {
             status.firstToken();
             output.println(theme.error("错误: " + safeMessage(error)));
         } finally {
-            activeStream.set(null);
+            activeRun.set(null);
             status.close();
             output.flush();
         }
